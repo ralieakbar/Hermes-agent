@@ -1,183 +1,109 @@
 #!/usr/bin/env bash
-# Membuat 9Router permanen di mesin LOKAL (Linux/macOS) + sambungkan ke Tailscale
+# 9Router permanen di mesin LOKAL (Linux desktop / WSL / macOS) + akses dari HP via Tailscale.
 #
-# Pemakaian:
-#   NINEROUTER_API_KEY=sk-xxx bash setup-local.sh
-#   NINEROUTER_PORT=20128 bash setup-local.sh
+#   NINEROUTER_API_KEY=sk-xxx bash tailscale/setup-local.sh
 #
-# Setelah selesai, mesin lokal juga terekspos ke tailnet sehingga HP bisa
-# memilih 9Router dari VPS atau lokal, tergantung latensi dan preferensi.
+# Linux: systemd --user (+ linger) → fallback pm2.  macOS: LaunchAgent (KeepAlive).
+# Windows: pakai tailscale/setup-windows.ps1.
 set -euo pipefail
+# shellcheck source=common.sh
+. "$(dirname "$0")/common.sh"
 
-NR_PORT="${NINEROUTER_PORT:-20128}"
-NR_KEY="${NINEROUTER_API_KEY:-}"
+[ "$(id -u)" -ne 0 ] || die "Jalankan sebagai user biasa (bukan root); sudo dipanggil seperlunya"
 
-ok()   { printf '\033[32m[OK]\033[0m %s\n' "$*"; }
-warn() { printf '\033[33m[WARN]\033[0m %s\n' "$*"; }
-err()  { printf '\033[31m[ERR]\033[0m %s\n' "$*"; }
-step() { printf '\n\033[36m== %s ==\033[0m\n' "$*"; }
+step "1. Deteksi 9Router"
+resolve_nr
+disable_builtin_autostart "$HOME"
 
-OS="$(uname -s)"
-
-# ── Deteksi & start 9Router ───────────────────────────────────────────────────
-step "1. Pastikan 9Router berjalan di port $NR_PORT"
-
-NR_BIN="$(command -v 9router 2>/dev/null || command -v 9-router 2>/dev/null || true)"
-[[ -n "$NR_BIN" ]] || { err "9router tidak ada di PATH. Install: npm i -g 9router"; exit 1; }
-
-if ! (ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":$NR_PORT "; then
-  warn "9Router belum jalan, mencoba start..."
-  nohup "$NR_BIN" --port "$NR_PORT" --host 127.0.0.1 &>/tmp/9router-local.log &
-  sleep 3
-fi
-(ss -ltn 2>/dev/null || netstat -ltn 2>/dev/null) | grep -q ":$NR_PORT " \
-  && ok "9Router listening di port $NR_PORT" \
-  || { err "9Router gagal start. Cek /tmp/9router-local.log"; exit 1; }
-
-# ── Auto-start: Linux (systemd --user) ────────────────────────────────────────
-setup_linux_systemd() {
-  mkdir -p "$HOME/.config/systemd/user"
-  cat > "$HOME/.config/systemd/user/9router.service" <<EOF
+step "2. Jadikan 9Router permanen"
+if [ "$OS" = Linux ]; then
+  if systemctl --user show-environment >/dev/null 2>&1; then
+    release_from_pm2
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/9router.service" <<EOF
 [Unit]
-Description=9Router OpenAI-compatible proxy (user session)
-After=network.target
+Description=9Router (OpenAI-compatible LLM proxy)
+After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=$(command -v node) $(npm root -g)/9router/bin/9router.js --port $NR_PORT --host 127.0.0.1
+Environment=PATH=$SVC_PATH
+Environment=NODE_ENV=production
+ExecStart="$NODE_BIN" "$NR_CLI" ${NR_ARGS[*]}
 Restart=always
 RestartSec=5
-Environment=NODE_ENV=production
+KillMode=control-group
+TimeoutStopSec=15
 
 [Install]
 WantedBy=default.target
 EOF
-  systemctl --user daemon-reload
-  systemctl --user enable --now 9router
-  # linger agar service jalan meski user belum login (opsional di desktop)
-  loginctl enable-linger "$USER" 2>/dev/null || true
-  ok "systemd --user: 9router.service aktif"
-}
-
-# ── Auto-start: macOS (LaunchAgent) ───────────────────────────────────────────
-setup_macos_launchagent() {
-  NR_FULL_BIN="$(node -e "require('path');console.log(require.resolve('9router/bin/9router.js'))" 2>/dev/null \
-    || find "$(npm root -g)" -name '9router.js' -path '*/bin/*' 2>/dev/null | head -1 \
-    || echo "$NR_BIN")"
-  PLIST="$HOME/Library/LaunchAgents/com.9router.plist"
-  NODE_BIN="$(command -v node)"
-  cat > "$PLIST" <<EOF
+    systemctl --user daemon-reload
+    systemctl --user enable 9router >/dev/null 2>&1
+    systemctl --user restart 9router
+    # linger: service tetap jalan setelah boot walau belum login
+    loginctl enable-linger "$USER" 2>/dev/null || as_root loginctl enable-linger "$USER" || \
+      warn "Linger gagal diaktifkan; 9Router baru jalan setelah Anda login"
+    ok "systemd --user: 9router.service enabled (journalctl --user -u 9router -f)"
+  else
+    warn "systemd --user tidak tersedia (mis. WSL tanpa systemd) → pakai pm2"
+    setup_pm2
+  fi
+elif [ "$OS" = Darwin ]; then
+  PLIST="$HOME/Library/LaunchAgents/com.9router.service.plist"
+  mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
+  {
+    cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key>          <string>com.9router</string>
+  <key>Label</key><string>com.9router.service</string>
   <key>ProgramArguments</key>
   <array>
     <string>$NODE_BIN</string>
-    <string>$NR_FULL_BIN</string>
-    <string>--port</string> <string>$NR_PORT</string>
-    <string>--host</string> <string>127.0.0.1</string>
+    <string>$NR_CLI</string>
+EOF
+    for a in "${NR_ARGS[@]}"; do printf '    <string>%s</string>\n' "$a"; done
+    cat <<EOF
   </array>
-  <key>RunAtLoad</key>      <true/>
-  <key>KeepAlive</key>      <true/>
-  <key>StandardOutPath</key> <string>/tmp/9router.log</string>
-  <key>StandardErrorPath</key> <string>/tmp/9router.err</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>NODE_ENV</key> <string>production</string>
+    <key>PATH</key><string>$SVC_PATH</string>
+    <key>NODE_ENV</key><string>production</string>
   </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$HOME/Library/Logs/9router.log</string>
+  <key>StandardErrorPath</key><string>$HOME/Library/Logs/9router.err.log</string>
 </dict>
 </plist>
 EOF
-  launchctl unload "$PLIST" 2>/dev/null || true
-  launchctl load -w "$PLIST"
-  ok "LaunchAgent terdaftar: $PLIST"
-}
-
-step "2. Konfigurasi auto-start"
-if [[ "$OS" == "Linux" ]]; then
-  if systemctl --user --version >/dev/null 2>&1; then
-    setup_linux_systemd
-  elif command -v pm2 >/dev/null; then
-    pm2 start "$NR_BIN" --name 9router -- --port "$NR_PORT" --host 127.0.0.1
-    pm2 save; pm2 startup 2>&1 | grep -E '^sudo|^env ' | head -1 | bash || \
-      warn "Jalankan 'pm2 startup' secara manual untuk enable startup otomatis"
-    ok "pm2: 9router terdaftar (fallback)"
-  else
-    warn "Tidak ada systemd --user atau pm2. Install pm2: npm i -g pm2, lalu ulang."
-  fi
-elif [[ "$OS" == "Darwin" ]]; then
-  setup_macos_launchagent
+  } > "$PLIST"
+  plutil -lint "$PLIST" >/dev/null
+  launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null || launchctl load -w "$PLIST"
+  ok "LaunchAgent aktif: $PLIST (log: ~/Library/Logs/9router.log)"
 else
-  warn "OS tidak dikenali ($OS). Lihat catatan Windows di README."
+  die "OS tidak didukung: $OS (Windows: tailscale/setup-windows.ps1)"
 fi
 
-# ── Install Tailscale lokal ────────────────────────────────────────────────────
-step "3. Install Tailscale"
+wait_listening 300 || die "9Router tidak merespons di port $NR_PORT (cek log service di atas)"
+ok "9Router merespons di http://127.0.0.1:$NR_PORT"
 
-if command -v tailscale >/dev/null; then
-  ok "Tailscale sudah ada: $(tailscale version | head -1)"
-else
-  if [[ "$OS" == "Linux" ]]; then
-    curl -fsSL https://tailscale.com/install.sh | sh
-  elif [[ "$OS" == "Darwin" ]]; then
-    if command -v brew >/dev/null; then
-      brew install --cask tailscale
-    else
-      open "https://tailscale.com/download/mac"
-      echo "   Buka link di atas, install Tailscale, lalu lanjutkan skrip."
-      read -rp "Tailscale sudah terinstall? (y/N): " C; [[ "${C,,}" == y ]] || exit 0
-    fi
-  fi
-  ok "Tailscale terinstall"
+step "3. Tailscale"
+ts_install
+ts_login
+
+step "4. Expose ke tailnet (HTTPS, hanya perangkat di akun Tailscale Anda)"
+ts_serve
+ts_verify
+
+if [ "${SKIP_HERMES:-0}" != 1 ]; then
+  step "5. Hubungkan Hermes di mesin ini ke 9Router"
+  configure_hermes "$(id -un)" "$HOME"
 fi
 
-TS_STATUS="$(tailscale status --json 2>/dev/null | python3 -c \
-  'import sys,json;print(json.load(sys.stdin).get("BackendState",""))' 2>/dev/null || echo "")"
-if [[ "$TS_STATUS" != "Running" ]]; then
-  warn "Tailscale belum login. Jalankan:"
-  echo "   sudo tailscale up --ssh"
-  echo "   Lalu buka URL autentikasi di browser."
-  read -rp "Sudah login? (y/N): " C; [[ "${C,,}" == y ]] || exit 0
-else
-  ok "Tailscale sudah running"
-fi
-
-# ── Expose via tailscale serve ─────────────────────────────────────────────────
-step "4. Expose 9Router ke tailnet"
-
-if tailscale serve status 2>/dev/null | grep -q ":$NR_PORT"; then
-  ok "Tailscale serve sudah aktif untuk port $NR_PORT"
-else
-  tailscale serve --bg "http://127.0.0.1:$NR_PORT"
-  ok "Tailscale serve dikonfigurasi"
-fi
-
-TS_HOST="$(tailscale status --json 2>/dev/null | python3 -c \
-  'import sys,json;d=json.load(sys.stdin);s=d.get("Self",{});print(s.get("DNSName","").rstrip("."))' \
-  2>/dev/null || echo "<hostname>.ts.net")"
-TS_IP="$(tailscale ip -4 2>/dev/null | head -1 || echo "100.x.x.x")"
-
-# ── Simpan API key (opsional) ─────────────────────────────────────────────────
-if [[ -n "$NR_KEY" ]]; then
-  NR_ENV="${HOME}/.hermes/.env"
-  touch "$NR_ENV"; chmod 600 "$NR_ENV"
-  grep -v '^NINEROUTER_API_KEY=' "$NR_ENV" > "$NR_ENV.tmp" || true
-  echo "NINEROUTER_API_KEY=$NR_KEY" >> "$NR_ENV.tmp"
-  mv "$NR_ENV.tmp" "$NR_ENV"
-  ok "API key 9Router disimpan ke ~/.hermes/.env"
-fi
-
-step "5. Ringkasan"
-echo ""
-echo "  ┌──────────────────────────────────────────────────────────────────┐"
-echo "  │  9Router lokal sekarang PERMANEN dan terekspos ke Tailscale:     │"
-printf "  │  Tailscale HTTPS: https://%s/v1\n" "$TS_HOST"
-printf "  │  Tailscale IP:    http://%s:%s/v1\n" "$TS_IP" "$NR_PORT"
-echo "  │  Lokal langsung:  http://127.0.0.1:$NR_PORT/v1                    │"
-echo "  └──────────────────────────────────────────────────────────────────┘"
-echo ""
-echo "  Langkah lanjutan untuk Hermes di klien lain:"
-echo "     NINEROUTER_URL=https://$TS_HOST/v1 bash fix-9router.sh"
-echo ""
+step "Selesai"
+print_summary

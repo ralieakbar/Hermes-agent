@@ -1,76 +1,45 @@
 # 9Router Permanen di Windows + Tailscale
 
-## Auto-start 9Router di Windows
+## Otomatis (disarankan)
 
-### Metode A — pm2-windows-service (Rekomendasi)
+PowerShell **Run as Administrator**, dari folder kit:
 
 ```powershell
-# Install pm2 dan module windows service
-npm install -g pm2 pm2-windows-service
-pm2-service-install -n pm2
-
-# Daftarkan 9Router
-pm2 start 9router --name 9router -- --port 20128 --host 127.0.0.1
-pm2 save
+npm i -g 9router                                   # jika belum
+Set-ExecutionPolicy -Scope Process Bypass -Force
+.\tailscale\setup-windows.ps1                      # opsional: -Port 20128
 ```
 
-Setelah ini, 9Router otomatis jalan setiap Windows boot meski tidak ada user login.
+Skrip ini:
+1. Menonaktifkan autostart bawaan 9Router (`Startup\9router.vbs`, bind `0.0.0.0`).
+2. Mendaftarkan Task Scheduler `9Router` — jalan saat boot tanpa perlu login (S4U, akun Anda,
+   data `%APPDATA%\9router` tetap sama), restart otomatis bila gagal, bind `127.0.0.1`.
+3. Menginstall Tailscale (winget), login, lalu `tailscale serve --bg http://127.0.0.1:20128`.
 
-### Metode B — Task Scheduler (tanpa npm tambahan)
+## Manual (jika tidak bisa menjalankan skrip)
 
-1. Buka **Task Scheduler** (Win+R → `taskschd.msc`)
-2. Klik **Create Basic Task** → beri nama `9Router`
-3. Trigger: **When the computer starts**
-4. Action: **Start a program**
-   - Program: `node`
-   - Arguments: `C:\Users\<kamu>\AppData\Roaming\npm\node_modules\9router\bin\9router.js --port 20128 --host 127.0.0.1`
-5. Centang **Run whether user is logged on or not** → masukkan password
-6. Centang **Run with highest privileges**
-
-### Metode C — NSSM (Non-Sucking Service Manager)
+Path yang benar adalah `cli.js` dan **wajib** memakai `--skip-update` (tanpa konsol,
+9Router menampilkan menu interaktif lalu berhenti jika flag ini tidak ada).
 
 ```powershell
-# Download nssm dari nssm.cc, letakkan di PATH
-nssm install 9router node "C:\Users\<kamu>\AppData\Roaming\npm\node_modules\9router\bin\9router.js"
-nssm set 9router AppParameters "--port 20128 --host 127.0.0.1"
+$node = (Get-Command node).Source
+$cli  = Join-Path (npm root -g).Trim() '9router\cli.js'
+nssm install 9router $node "`"$cli`" --no-browser --skip-update --host 127.0.0.1 --port 20128"
+nssm set 9router ObjectName ".\$env:USERNAME" "<password-windows>"   # agar memakai %APPDATA% Anda
 nssm set 9router Start SERVICE_AUTO_START
 nssm start 9router
+
+& 'C:\Program Files\Tailscale\tailscale.exe' serve --bg http://127.0.0.1:20128
 ```
 
----
-
-## Install Tailscale di Windows
-
-1. Download dari: https://tailscale.com/download/windows
-2. Install dan login dengan akun yang sama
-3. Buka PowerShell sebagai Admin:
-
-```powershell
-# Expose 9Router ke tailnet
-tailscale serve --bg http://127.0.0.1:20128
-```
-
-4. Cek hostname:
-
-```powershell
-tailscale status
-```
-
----
-
-## Update Hermes di Windows
-
-Buka Git Bash atau WSL, lalu:
+## Hermes di Windows (WSL / Git Bash)
 
 ```bash
-NINEROUTER_URL=https://<hostname>.ts.net/v1 bash fix-9router.sh
+NINEROUTER_URL=https://<hostname>.<tailnet>.ts.net/v1 bash fix-9router.sh
 ```
-
----
 
 ## Akses dari HP
 
-1. Install Tailscale di HP (Play Store / App Store)
-2. Login dengan akun yang sama
-3. Buka browser HP → `https://<hostname-windows>.ts.net`
-4. Hermes di HP: set `NINEROUTER_URL=https://<hostname-windows>.ts.net/v1`
+1. Install Tailscale di HP (Play Store / App Store), login akun yang sama.
+2. Dashboard: `https://<hostname-pc>.<tailnet>.ts.net/dashboard`
+3. Endpoint API: `https://<hostname-pc>.<tailnet>.ts.net/v1`

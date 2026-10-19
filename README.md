@@ -5,7 +5,7 @@ Teruji terhadap **Hermes Agent v0.19.0** (skema config dibaca langsung dari sour
 ## 1. Perbaiki 9Router (semua profil)
 
 ```bash
-git clone -b claude/epic-pasteur-iffmca https://github.com/ralieakbar/Hermes-agent.git ~/hermes-vps-kit
+git clone https://github.com/ralieakbar/Hermes-agent.git ~/hermes-vps-kit
 cd ~/hermes-vps-kit
 DRY_RUN=1 NINEROUTER_API_KEY=<key> bash fix-9router.sh   # diagnosa dulu
 NINEROUTER_API_KEY=<key> bash fix-9router.sh             # terapkan
@@ -28,41 +28,44 @@ Backup otomatis: `config.yaml.bak-<timestamp>` dan `.env.bak-<timestamp>` di tia
 
 ## 2. 9Router Permanen + Akses via Tailscale (dari HP)
 
-### VPS (Linux)
-```bash
-# Install & jalankan — 9Router jadi auto-start + bisa diakses dari HP
-NINEROUTER_API_KEY=<key> bash tailscale/setup-vps.sh
+Prasyarat: `npm i -g 9router` sudah terpasang dan provider sudah diatur di dashboard 9Router.
+Jalankan sebagai **user biasa** (skrip memanggil `sudo` seperlunya).
 
-# Dengan Tailscale auth key (non-interaktif, cocok untuk CI/cloud-init):
-NINEROUTER_API_KEY=<key> TAILSCALE_AUTHKEY=tskey-auth-xxx bash tailscale/setup-vps.sh
-```
+| Mesin | Perintah | Auto-start |
+|---|---|---|
+| VPS Linux | `NINEROUTER_API_KEY=<key> bash tailscale/setup-vps.sh` | systemd (`9router.service`) → fallback pm2 / Docker `restart=always` |
+| Linux desktop / WSL | `NINEROUTER_API_KEY=<key> bash tailscale/setup-local.sh` | systemd `--user` + linger → fallback pm2 |
+| macOS | `NINEROUTER_API_KEY=<key> bash tailscale/setup-local.sh` | LaunchAgent `com.9router.service` (KeepAlive) |
+| Windows | `.\tailscale\setup-windows.ps1` (Admin) | Task Scheduler saat boot — lihat `tailscale/README-windows.md` |
 
-### Mesin Lokal (Linux/macOS)
-```bash
-NINEROUTER_API_KEY=<key> bash tailscale/setup-local.sh
-```
+Non-interaktif (cloud-init/CI): tambahkan `TAILSCALE_AUTHKEY=tskey-auth-xxx` (dibaca dari file sementara, tidak tampil di daftar proses).
+Opsi lain: `NINEROUTER_PORT`, `INSTALL_METHOD=systemd|pm2|docker`, `TAILSCALE_HOSTNAME`, `TAILSCALE_SSH=0`, `SKIP_HERMES=1`.
 
-### Windows
-Lihat `tailscale/README-windows.md` untuk pm2-windows-service / Task Scheduler / NSSM.
-
-### Update Hermes di klien lain (HP, laptop)
-```bash
-# Setelah setup VPS selesai, jalankan di mesin klien:
-NINEROUTER_URL=https://<hostname>.<tailnet>.ts.net/v1 bash tailscale/update-hermes-url.sh
-```
+Yang dilakukan skrip:
+1. Menjalankan 9Router sebagai service dengan `--no-browser --skip-update --host 127.0.0.1`
+   (tanpa `--skip-update`, 9Router menampilkan menu interaktif dan service gagal).
+2. Menonaktifkan autostart bawaan 9Router yang bind `0.0.0.0` dan berebut port.
+3. Install + login Tailscale, lalu `tailscale serve --bg` → HTTPS `https://<host>.<tailnet>.ts.net`
+   yang hanya bisa dibuka perangkat di akun Tailscale Anda. Tidak ada port publik yang dibuka.
+4. Verifikasi `https://<host>.ts.net/v1/models`, lalu menjalankan `fix-9router.sh` agar Hermes
+   di mesin itu memakai `http://127.0.0.1:20128/v1` (jalur tercepat).
 
 ### Akses dari HP
-1. Install Tailscale di HP: [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn.android) | [iOS](https://apps.apple.com/app/tailscale/id1470499037)
-2. Login dengan akun Tailscale yang sama
-3. Buka browser HP → `https://<hostname-vps>.ts.net` → dashboard 9Router
-4. Hermes di HP: `NINEROUTER_URL=https://<hostname-vps>.ts.net/v1`
+1. Install Tailscale: [Android](https://play.google.com/store/apps/details?id=com.tailscale.ipn.android) | [iOS](https://apps.apple.com/app/tailscale/id1470499037), login akun yang sama.
+2. Dashboard 9Router: `https://<host-vps>.<tailnet>.ts.net/dashboard`
+3. Endpoint untuk aplikasi chat di HP (OpenAI-compatible): `https://<host-vps>.<tailnet>.ts.net/v1` + API key 9Router.
+4. Hermes di perangkat lain (laptop, Termux): `NINEROUTER_URL=https://<host-vps>.<tailnet>.ts.net/v1 bash tailscale/update-hermes-url.sh`
 
-| Yang dilakukan | Hasil |
+> Aktifkan **MagicDNS** dan **HTTPS Certificates** sekali di https://login.tailscale.com/admin/dns.
+> Aktifkan juga *Require API key* di dashboard 9Router.
+
+### Perawatan
+| Tugas | Perintah |
 |---|---|
-| `systemd`/`pm2`/LaunchAgent/Task Scheduler | 9Router auto-start setelah reboot |
-| `tailscale serve --bg` | HTTPS tailnet tanpa buka firewall publik |
-| MagicDNS Tailscale | Nama host stabil, tidak perlu ingat IP |
-| `fix-9router.sh` dengan URL baru | Semua profil Hermes diperbarui sekaligus |
+| Status / log (VPS) | `systemctl status 9router` · `journalctl -u 9router -f` |
+| Update 9Router | `npm i -g 9router@latest && sudo systemctl restart 9router` (auto-update dimatikan di mode service) |
+| Cek tailnet | `tailscale serve status` · `tailscale status` |
+| Lepas akses tailnet | `sudo tailscale serve reset` |
 
 ---
 

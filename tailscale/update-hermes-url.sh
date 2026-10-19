@@ -1,26 +1,23 @@
 #!/usr/bin/env bash
-# Perbarui semua profil Hermes agar memakai URL 9Router dari Tailscale.
-# Jalankan di mesin yang BERBEDA dengan VPS (laptop, HP via Termux, dsb.)
-# setelah setup-vps.sh atau setup-local.sh berhasil di sisi server.
+# Arahkan semua profil Hermes di perangkat INI (laptop, HP via Termux, dsb.)
+# ke 9Router di VPS/lokal lewat Tailscale. Perangkat ini harus sudah login Tailscale.
 #
-# Pemakaian:
-#   NINEROUTER_URL=https://<hostname>.ts.net/v1 bash update-hermes-url.sh
-#   NINEROUTER_URL=http://100.x.x.x:20128/v1   bash update-hermes-url.sh
+#   NINEROUTER_URL=https://<hostname>.<tailnet>.ts.net/v1 NINEROUTER_API_KEY=sk-xxx \
+#     bash tailscale/update-hermes-url.sh
 set -euo pipefail
 
-NR_URL="${NINEROUTER_URL:-}"
-[[ -n "$NR_URL" ]] || {
-  echo "Masukkan URL 9Router via Tailscale:"
-  echo "  Contoh: https://vps-ku.tail1234.ts.net/v1"
-  echo "  Atau:   http://100.x.x.x:20128/v1"
-  read -rp "URL: " NR_URL
-}
+KIT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "$KIT_DIR/fix-9router.sh" ] || { echo "[ERR] fix-9router.sh tidak ditemukan di $KIT_DIR" >&2; exit 1; }
 
-# Delegate ke fix-9router.sh di direktori parent
-SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ -f "$SCRIPT_DIR/fix-9router.sh" ]]; then
-  NINEROUTER_URL="$NR_URL" bash "$SCRIPT_DIR/fix-9router.sh"
-else
-  err "fix-9router.sh tidak ditemukan di $SCRIPT_DIR"
-  exit 1
+NR_URL="${NINEROUTER_URL:-}"
+if [ -z "$NR_URL" ]; then
+  echo "URL 9Router via Tailscale (lihat ringkasan setup-vps.sh), contoh:"
+  echo "  https://vps-ku.tail1234.ts.net/v1"
+  read -rp "URL: " NR_URL
 fi
+case "$NR_URL" in
+  http://100.*|http://*.ts.net*)
+    echo "[WARN] 9Router hanya bind 127.0.0.1; pakai URL HTTPS dari 'tailscale serve' (https://<host>.ts.net/v1)" ;;
+esac
+
+NINEROUTER_URL="$NR_URL" exec bash "$KIT_DIR/fix-9router.sh"
